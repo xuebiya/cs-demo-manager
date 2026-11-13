@@ -87,7 +87,7 @@ jobs:
       - name: Package and create release
         run: |
           vp run build
-          vp run package --mac --publish always -c.publish.owner="${{ github.repository_owner }}" -c.publish.repo="${{ github.event.repository.name }}"
+          vp run package --mac --publish always --config.publish.owner="${{ github.repository_owner }}" --config.publish.repo="${{ github.event.repository.name }}"
         env:
           STEAM_API_KEYS: ${{ secrets.STEAM_API_KEYS }}
           FACEIT_API_KEY: ${{ secrets.FACEIT_API_KEY }}
@@ -121,7 +121,7 @@ jobs:
       - name: Package and create release
         run: |
           vp run build
-          vp run package --linux --publish always -c.publish.owner="${{ github.repository_owner }}" -c.publish.repo="${{ github.event.repository.name }}"
+          vp run package --linux --publish always --config.publish.owner="${{ github.repository_owner }}" --config.publish.repo="${{ github.event.repository.name }}"
         env:
           STEAM_API_KEYS: ${{ secrets.STEAM_API_KEYS }}
           FACEIT_API_KEY: ${{ secrets.FACEIT_API_KEY }}
@@ -152,7 +152,7 @@ jobs:
       - name: Package and create release
         run: |
           vp run build
-          vp run package --win --publish=always -c.publish.owner="${{ github.repository_owner }}" -c.publish.repo="${{ github.event.repository.name }}"
+          vp run package --win --publish=always --config.publish.owner="${{ github.repository_owner }}" --config.publish.repo="${{ github.event.repository.name }}"
         env:
           STEAM_API_KEYS: ${{ secrets.STEAM_API_KEYS }}
           FACEIT_API_KEY: ${{ secrets.FACEIT_API_KEY }}
