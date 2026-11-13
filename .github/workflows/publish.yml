@@ -37,66 +37,6 @@ jobs:
           fi
           exit 0
 
-  build-macos:
-    name: Build macOS
-    runs-on: macos-latest
-    needs: ensure-changes
-    permissions:
-      contents: write
-
-    steps:
-      - name: Install Apple certificate
-        run: |
-          # create variables
-          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-
-          # import certificate and provisioning profile from secrets
-          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
-
-          # create temporary keychain
-          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-
-          # import certificate to keychain
-          security import $CERTIFICATE_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH
-        env:
-          BUILD_CERTIFICATE_BASE64: ${{ secrets.APPLE_APPLICATION_CERTIFICATE }}
-          P12_PASSWORD: ${{ secrets.APPLE_P12_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-
-      - name: Install required tools
-        run: |
-          brew install python-setuptools
-
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: voidzero-dev/setup-vp@9fd26ff49f9b5e6276c2b493da4454ad4527f7f4 # v1.20.0
-        with:
-          version-file: package.json
-
-      - name: Create new version
-        run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          npm version ${{ github.event.inputs.release-type }} -m "chore: v%s"
-
-      - name: Package and create release
-        run: |
-          vp run build
-          vp run package --mac --publish always --config.publish.owner="${{ github.repository_owner }}" --config.publish.repo="${{ github.event.repository.name }}"
-        env:
-          STEAM_API_KEYS: ${{ secrets.STEAM_API_KEYS }}
-          FACEIT_API_KEY: ${{ secrets.FACEIT_API_KEY }}
-          CROWDIN_PERSONAL_TOKEN: ${{ secrets.CROWDIN_PERSONAL_TOKEN }}
-          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-
   build-linux:
     name: Build Linux
     runs-on: ubuntu-latest
@@ -162,14 +102,16 @@ jobs:
   publish-on-github:
     name: Publish on GitHub
     runs-on: ubuntu-latest
-    needs: [build-macos, build-linux, build-windows]
+    needs: [build-linux, build-windows]
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ssh-key: ${{ secrets.SSH_DEPLOYMENT_PRIVATE_KEY }}
-          persist-credentials: true
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: voidzero-dev/setup-vp@9fd26ff49f9b5e6276c2b493da4454ad4527f7f4 # v1.20.0
         with:
@@ -182,4 +124,70 @@ jobs:
           npm version ${{ github.event.inputs.release-type }} -m "chore: v%s"
 
       - name: Push the tag to GitHub
-        run: git push origin main --tags
+        run: git push --atomic origin "HEAD:${GITHUB_REF_NAME}" --follow-tags
+
+      - name: Publish release with installers
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync } from 'node:fs';
+
+          const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
+          const tag = `v${version}`;
+          const repository = process.env.GITHUB_REPOSITORY;
+          const baseUrl = process.env.GITHUB_API_URL || 'https://api.github.com';
+          const headers = {
+            Authorization: `Bearer ${process.env.GH_TOKEN}`,
+            Accept: 'application/vnd.github+json',
+            'Content-Type': 'application/json',
+            'X-GitHub-Api-Version': '2026-03-10',
+          };
+          async function api(path, options = {}) {
+            const response = await fetch(`${baseUrl}/repos/${repository}${path}`, { ...options, headers });
+            if (!response.ok) {
+              throw new Error(`GitHub API ${response.status}: ${await response.text()}`);
+            }
+            return response.json();
+          }
+
+          let release;
+          for (let page = 1; ; page++) {
+            const releases = await api(`/releases?per_page=100&page=${page}`);
+            release = releases.find((item) => item.tag_name === tag);
+            if (release || releases.length < 100) break;
+          }
+          if (!release) throw new Error(`No uploaded release found for ${tag}`);
+
+          const assets = [];
+          for (let page = 1; ; page++) {
+            const batch = await api(`/releases/${release.id}/assets?per_page=100&page=${page}`);
+            assets.push(...batch);
+            if (batch.length < 100) break;
+          }
+          const extensions = ['.exe', '.deb', '.rpm', '.AppImage'];
+          const installers = extensions.map((extension) => {
+            const asset = assets.find((item) =>
+              item.name.includes(version) && item.name.endsWith(extension) &&
+              item.state === 'uploaded' && item.size > 0);
+            if (!asset) throw new Error(`Missing completed ${extension} installer for ${tag}`);
+            return asset;
+          });
+
+          const published = await api(`/releases/${release.id}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ draft: false, prerelease: false, make_latest: 'true' }),
+          });
+          if (published.draft || published.prerelease) {
+            throw new Error(`Release ${tag} was not published as a stable release`);
+          }
+          console.log(`Published ${published.html_url}`);
+          const summary = [
+            `## Release ${tag}`,
+            `[Open GitHub Release](${published.html_url})`,
+            ...installers.map((asset) => `- [${asset.name}](${asset.browser_download_url})`),
+            '',
+          ].join('\n');
+          console.log(summary);
+          if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
+          NODE
